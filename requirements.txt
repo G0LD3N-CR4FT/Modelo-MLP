@@ -10,3 +10,5 @@ numpy
 tensorflow
 scipy
 tqdm
+
+pydantic

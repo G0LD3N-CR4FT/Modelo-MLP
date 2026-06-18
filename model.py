@@ -7,16 +7,18 @@ from tensorflow.keras.datasets import mnist
 
 class MLP():
     def __init__(self, din, dout):
+        # Inicialização Xavier/Glorot
         self.W = (2 * np.random.rand(dout, din) - 1) * (np.sqrt(6) / np.sqrt(din + dout))
-        self.b = (2 * np.random.rand(dout) - 1) * (np.sqrt(6) / np.sqrt(din + dout))
+        self.b = np.zeros(dout)
 
     def forward(self, x):
         self.x = x
         return x @ self.W.T + self.b
 
     def backward(self, gradout):
-        self.deltaW = gradout.T @ self.x
-        self.deltab = gradout.sum(0)
+        # Média sobre o batch
+        self.deltaW = gradout.T @ self.x / gradout.shape[0]
+        self.deltab = gradout.sum(0)     / gradout.shape[0]
         return gradout @ self.W
 
 
@@ -49,18 +51,18 @@ class ReLU():
 class LogSoftmax():
     def forward(self, x):
         self.x = x
-        return x - logsumexp(x, axis=1)[..., None]
+        self.probs = np.exp(x - logsumexp(x, axis=1)[..., None])
+        return np.log(self.probs + 1e-15) # Evita log(0)
 
     def backward(self, gradout):
-        gradients = np.eye(self.x.shape[1])[None, ...]
-        gradients = gradients - (np.exp(self.x) / np.sum(np.exp(self.x), axis=1)[..., None])[..., None]
-        return (np.matmul(gradients, gradout[..., None]))[:, :, 0]
+        return gradout - self.probs * gradout.sum(axis=1)[..., None]
 
 
 class NLLLoss():
     def forward(self, pred, true):
         self.pred = pred
         self.true = true
+
         loss = 0
         for b in range(pred.shape[0]):
             loss -= pred[b, true[b]]
@@ -68,10 +70,11 @@ class NLLLoss():
 
     def backward(self):
         din = self.pred.shape[1]
-        jacobian = np.zeros((self.pred.shape[0], din))
-        for b in range(self.pred.shape[0]):
+        batch_size = self.pred.shape[0]  # <--- Captura dinamicamente o tamanho do lote
+        jacobian = np.zeros((batch_size, din))
+        for b in range(batch_size):
             jacobian[b, self.true[b]] = -1
-        return jacobian
+        return jacobian / batch_size
 
     def __call__(self, pred, true):
         return self.forward(pred, true)
@@ -94,27 +97,40 @@ def predict(model, image_array):
 
 
 def train(model, optimizer, trainX, trainy, loss_fct=NLLLoss(), nb_epochs=10, batch_size=100):
-    for epoch in tqdm(range(nb_epochs)):
-        batch_idx = [np.random.randint(0, trainX.shape[0]) for _ in range(batch_size)]
-        x = trainX[batch_idx]
-        target = trainy[batch_idx]
+    num_samples = trainX.shape[0]
+    num_batches = num_samples // batch_size
 
-        prediction = model.forward(x)
-        loss_fct(prediction, target)
+    for epoch in range(nb_epochs):
+        indices = np.arange(num_samples)
+        np.random.shuffle(indices)
 
-        gradout = loss_fct.backward()
-        model.backward(gradout)
-        optimizer.step()
+        running_loss = 0
+        # tqdm agora envolve os lotes internos, não as épocas externas
+        with tqdm(total=num_batches, desc=f"Epoch {epoch+1}/{nb_epochs}") as pbar:
+            for b in range(num_batches):
+                batch_idx = indices[b * batch_size : (b + 1) * batch_size]
+                x = trainX[batch_idx]
+                target = trainy[batch_idx]
+
+                prediction = model.forward(x)
+                loss = loss_fct(prediction, target)
+                running_loss += loss
+
+                gradout = loss_fct.backward()
+                model.backward(gradout)
+                optimizer.step()
+                
+                pbar.set_postfix({'loss': running_loss / (b + 1)})
+                pbar.update(1)
 
 
 def preprocess_image(file):
     image = Image.open(file).convert('L')
     image = image.resize((28, 28))
     image = np.array(image)
-
-    image = image / 255.0
+    # Corrigido para bater com a normalização (-1 a 1) feita no treino
+    image = (image - 127.5) / 127.5
     image = image.reshape(1, 784)
-
     return image
 
 
@@ -138,7 +154,7 @@ def load_model():
     ])
 
     # Otimizador
-    optimizer = Optimizer(1e-3, mlp)
+    optimizer = Optimizer(1e-1, mlp)
 
     # Treinar
     train(mlp, optimizer, trainX, trainy, nb_epochs=10)
