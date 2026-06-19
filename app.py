@@ -7,13 +7,27 @@ import numpy as np
 from PIL import Image
 import io
 import base64
+from contextlib import asynccontextmanager
 
-from model import predict, preprocess_image, load_model
+# Nossos novos módulos do Cassandra
+from db.seeder import seed_mnist_data
+from model import predict, load_model
 
 
-model = load_model()
+# Gerenciador de inicialização do FastAPI
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Executa quando o servidor está ligando
+    print("🚀 Verificando banco de dados Cassandra e populando MNIST...")
+    seed_mnist_data() 
+    
+    # Carrega o modelo (agora lerá os dados direto do Cassandra)
+    global model
+    model = load_model()
+    yield
+    # Executa quando o servidor está desligando (se quiser fechar conexões)
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 # Modelo Pydantic para capturar a string em Base64 enviada pelo JavaScript
@@ -36,10 +50,8 @@ async def predict_image(data: ImageData):
     img_array = np.array(img, dtype=np.float32)
 
     img_array[img_array < 50] = 0.0
-
     img_array = np.clip(img_array * 1.5, 0.0, 255.0)
     img_array = (img_array - 127.5) / 127.5
-
     img_array = img_array.reshape(1, 784)
 
     prediction = predict(model, img_array)

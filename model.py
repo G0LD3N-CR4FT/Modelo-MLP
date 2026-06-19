@@ -1,8 +1,10 @@
+import os
+import pickle
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from scipy.special import logsumexp
-from tensorflow.keras.datasets import mnist
+from db.database import CassandraDB
 
 
 class MLP():
@@ -134,19 +136,58 @@ def preprocess_image(file):
     return image
 
 
+def load_data_from_cassandra():
+    """Busca o dataset MNIST de dentro do Cassandra e reconstrói as matrizes NumPy"""
+    print("📥 Puxando dados de treino do Apache Cassandra para a MLP...")
+    db = CassandraDB()
+    session = db.get_session()
+    
+    # 1. Buscar dados de Treino
+    query_train = "SELECT label, pixels FROM mnist_dataset WHERE split = 'train'"
+    results_train = session.execute(query_train)
+    
+    train_x_list = []
+    train_y_list = []
+    
+    for row in results_train:
+        train_x_list.append(row.pixels)
+        train_y_list.append(row.label)
+        
+    # 2. Buscar dados de Teste
+    print("📥 Puxando dados de teste do Apache Cassandra para validação...")
+    query_test = "SELECT label, pixels FROM mnist_dataset WHERE split = 'test'"
+    results_test = session.execute(query_test)
+    
+    test_x_list = []
+    test_y_list = []
+    
+    for row in results_test:
+        test_x_list.append(row.pixels)
+        test_y_list.append(row.label)
+
+    # 3. Converter de volta para os arrays de alta performance do NumPy
+    trainX = np.array(train_x_list, dtype=np.float32)
+    trainy = np.array(train_y_list, dtype=np.int64)
+    testX = np.array(test_x_list, dtype=np.float32)
+    testy = np.array(test_y_list, dtype=np.int64)
+    
+    print(f"✅ Dataset carregado com sucesso do Banco! Treino: {trainX.shape}, Teste: {testX.shape}")
+    return trainX, trainy, testX, testy
+
 def load_model():
-    # Carregar dados (treino + teste)
-    (trainX, trainy), (testX, testy) = mnist.load_data()
+    MODEL_PATH = "mlp_mnist_model.pkl"
+    
+    # Se o modelo já foi treinado antes, carrega ele instantaneamente do arquivo binário
+    if os.path.exists(MODEL_PATH):
+        print("💾 Carregando pesos e bias pré-treinados do arquivo local...")
+        with open(MODEL_PATH, "rb") as f:
+            return pickle.load(f)
+            
+    # Se não existir, extrai do Cassandra e treina a rede
+    print("🧠 Modelo treinado não encontrado localmente.")
+    trainX, trainy, testX, testy = load_data_from_cassandra()
 
-    # Normalizar treino
-    trainX = (trainX - 127.5) / 127.5
-    trainX = trainX.reshape(trainX.shape[0], 28 * 28)
-
-    # Normalizar teste
-    testX = (testX - 127.5) / 127.5
-    testX = testX.reshape(testX.shape[0], 28 * 28)
-
-    # Criar modelo
+    # Criar modelo com a sua arquitetura original
     mlp = SequentialNN([
         MLP(28*28, 128), ReLU(),
         MLP(128, 64), ReLU(),
@@ -156,15 +197,17 @@ def load_model():
     # Otimizador
     optimizer = Optimizer(1e-1, mlp)
 
-    # Treinar
+    # Treinar usando os dados do Cassandra
     train(mlp, optimizer, trainX, trainy, nb_epochs=10)
 
-    # =========================
-    # Calcular acurácia (rápido)
-    # =========================
+    # Calcular acurácia no bloco de teste extraído do Cassandra
     preds = mlp.forward(testX).argmax(axis=1)
     accuracy = (preds == testy).mean()
-
     print('Test accuracy:', accuracy * 100, '%')
+
+    # Salva o arquivo em disco para os próximos boots do contêiner
+    print(f"💾 Salvando neurônios treinados em '{MODEL_PATH}'...")
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump(mlp, f)
 
     return mlp

@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra_node
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=MLP_Cluster
+      - JVM_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/9042' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12        # Dá até 1 minuto inteiro pro Java inicializar na WSL2
+      start_period: 25s
+
+# --- Única GUI Web moderna com suporte real a Cassandra ---
+  cassandra-gui:
+    image: apache/zeppelin:0.11.1
+    container_name: cassandra_gui
+    ports:
+      - "8080:8080"
+    environment:
+      - ZEPPELIN_PORT=8080
+    depends_on:
+      cassandra:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fastapi_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - CASSANDRA_HOST=cassandra
+    depends_on:
+      - cassandra
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  cassandra_data:
